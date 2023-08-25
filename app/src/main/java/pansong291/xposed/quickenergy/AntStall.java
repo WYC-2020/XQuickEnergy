@@ -7,6 +7,8 @@ import pansong291.xposed.quickenergy.util.Config;
 import pansong291.xposed.quickenergy.util.FriendIdMap;
 import pansong291.xposed.quickenergy.util.Log;
 
+import java.util.*;
+
 /**
  * @author Constanline
  * @since 2023/08/22
@@ -14,6 +16,16 @@ import pansong291.xposed.quickenergy.util.Log;
 public class AntStall {
     private static final String TAG = AntStall.class.getCanonicalName();
 
+
+    private static class Seat {
+        public String userId;
+        public int hot;
+
+        public Seat(String userId, int hot) {
+            this.userId = userId;
+            this.hot = hot;
+        }
+    }
 
     public static void start() {
         if (!Config.enableStall()) {
@@ -30,16 +42,26 @@ public class AntStall {
         String s = AntStallRpcCall.home();
         try {
             JSONObject jo = new JSONObject(s);
-            if (jo.getString("resultCode").equals("SUCCESS")) {
+            if ("SUCCESS".equals(jo.getString("resultCode"))) {
                 if (!jo.getBoolean("hasRegister") || jo.getBoolean("hasQuit")) {
-                    Log.recordLog("蚂蚁新村⛪请先开启蚂蚁新村");
+                    Log.farm("蚂蚁新村⛪请先开启蚂蚁新村");
                     return;
                 }
                 settle(jo);
 
-                shopList();
+//                shopList();
+
+                if (Config.stallAutoClose()) {
+                    closeShop();
+                }
+
+                if (Config.stallAutoOpen()) {
+                    openShop();
+                }
 
                 taskList();
+
+                roadmap();
 
             } else {
                 Log.recordLog("home err:", s);
@@ -58,12 +80,12 @@ public class AntStall {
                 JSONObject coinsMap = seat.getJSONObject("coinsMap");
                 JSONObject master = coinsMap.getJSONObject("MASTER");
                 String assetId = master.getString("assetId");
-                int settleCoin = (int)(master.getJSONObject("money").getDouble("amount"));
+                int settleCoin = (int) (master.getJSONObject("money").getDouble("amount"));
                 if (settleCoin > 1) {
                     String s = AntStallRpcCall.settle(assetId, settleCoin);
                     JSONObject jo = new JSONObject(s);
                     if (jo.getString("resultCode").equals("SUCCESS")) {
-                        Log.recordLog("蚂蚁新村⛪收取金币" + settleCoin);
+                        Log.farm("蚂蚁新村⛪[收取金币]#" + settleCoin);
                     } else {
                         Log.recordLog("settle err:", s);
                     }
@@ -76,11 +98,139 @@ public class AntStall {
         }
     }
 
+    private static void closeShop() {
+        String s = AntStallRpcCall.shopList();
+        try {
+            JSONObject jo = new JSONObject(s);
+            if ("SUCCESS".equals(jo.getString("resultCode"))) {
+                JSONArray astUserShopList = jo.getJSONArray("astUserShopList");
+                for (int i = 0; i < astUserShopList.length(); i++) {
+                    JSONObject shop = astUserShopList.getJSONObject(i);
+                    if ("OPEN".equals(shop.getString("status"))) {
+                        JSONObject rentLastEnv = shop.getJSONObject("rentLastEnv");
+                        long gmtLastRent = rentLastEnv.getLong("gmtLastRent");
+                        if (System.currentTimeMillis() - gmtLastRent > (long) Config.stallSelfOpenTime() * 60 * 1000) {
+                            String shopId = shop.getString("shopId");
+                            String rentLastBill = shop.getString("rentLastBill");
+                            String rentLastUser = shop.getString("rentLastUser");
+                            shopClose(shopId, rentLastBill, rentLastUser);
+                        }
+                    }
+                }
+            } else {
+                Log.recordLog("closeShop err:", s);
+            }
+        } catch (Throwable t) {
+            Log.i(TAG, "closeShop err:");
+            Log.printStackTrace(TAG, t);
+        }
+    }
+
+    private static void openShop() {
+        String s = AntStallRpcCall.shopList();
+        try {
+            JSONObject jo = new JSONObject(s);
+            if ("SUCCESS".equals(jo.getString("resultCode"))) {
+                JSONArray astUserShopList = jo.getJSONArray("astUserShopList");
+                Queue<String> shopIds = new LinkedList<>();
+                for (int i = 0; i < astUserShopList.length(); i++) {
+                    JSONObject astUserShop = astUserShopList.getJSONObject(i);
+                    if ("FREE".equals(astUserShop.getString("status"))) {
+                        shopIds.add(astUserShop.getString("shopId"));
+                    }
+                }
+                rankCoinDonate(shopIds);
+            } else {
+                Log.recordLog("closeShop err:", s);
+            }
+        } catch (Throwable t) {
+            Log.i(TAG, "closeShop err:");
+            Log.printStackTrace(TAG, t);
+        }
+    }
+
+    private static void rankCoinDonate(Queue<String> shopIds) {
+        String s = AntStallRpcCall.rankCoinDonate();
+        try {
+            JSONObject jo = new JSONObject(s);
+            if ("SUCCESS".equals(jo.getString("resultCode"))) {
+                JSONArray friendRankList = jo.getJSONArray("friendRankList");
+                List<Seat> seats = new ArrayList<>();
+                for (int i = 0; i < friendRankList.length(); i++) {
+                    JSONObject friendRank = friendRankList.getJSONObject(i);
+                    if (friendRank.getBoolean("canOpenShop")) {
+                        String userId = friendRank.getString("userId");
+                        if (Config.stallOpenType()) {
+                            if (!Config.stallOpenList().contains(userId)) {
+                                continue;
+                            }
+                        } else if (Config.stallOpenList().contains(userId)) {
+                            continue;
+                        }
+                        int hot = friendRank.getInt("hot");
+                        seats.add(new Seat(userId, hot));
+                    }
+                }
+                friendHomeOpen(seats, shopIds);
+            } else {
+                Log.recordLog("rankCoinDonate err:", s);
+            }
+        } catch (Throwable t) {
+            Log.i(TAG, "rankCoinDonate err:");
+            Log.printStackTrace(TAG, t);
+        }
+    }
+
+    private static void openShop(String seatId, String userId, Queue<String> shopIds) {
+        String shopId = shopIds.peek();
+        String s = AntStallRpcCall.shopOpen(seatId, userId, shopId);
+        try {
+            JSONObject jo = new JSONObject(s);
+            if ("SUCCESS".equals(jo.getString("resultCode"))) {
+                shopIds.poll();
+            }
+        } catch (Throwable t) {
+            Log.i(TAG, "openShop err:");
+            Log.printStackTrace(TAG, t);
+        }
+    }
+
+    private static void friendHomeOpen(List<Seat> seats, Queue<String> shopIds) {
+        Collections.sort(seats, (e1, e2) -> e2.hot - e1.hot);
+        int idx = 0;
+        while (seats.size() > idx && !shopIds.isEmpty()) {
+            Seat seat = seats.get(idx);
+            String userId = seat.userId;
+            String s = AntStallRpcCall.friendHome(userId);
+            try {
+                JSONObject jo = new JSONObject(s);
+                if ("SUCCESS".equals(jo.getString("resultCode"))) {
+                    JSONObject seatsMap = jo.getJSONObject("seatsMap");
+                    JSONObject guest = seatsMap.getJSONObject("GUEST_01");
+                    if (guest.getBoolean("canOpenShop")) {
+                        openShop(guest.getString("seatId"), userId, shopIds);
+                    } else {
+                        guest = seatsMap.getJSONObject("GUEST_02");
+                        if (guest.getBoolean("canOpenShop")) {
+                            openShop(guest.getString("seatId"), userId, shopIds);
+                        }
+                    }
+                } else {
+                    Log.recordLog("friendHomeOpen err:", s);
+                }
+            } catch (Throwable t) {
+                Log.i(TAG, "friendHomeOpen err:");
+                Log.printStackTrace(TAG, t);
+            }
+            idx++;
+        }
+    }
+
     private static void shopList() {
         String s = AntStallRpcCall.shopList();
         try {
             JSONObject jo = new JSONObject(s);
-            if (jo.getString("resultCode").equals("SUCCESS")) {
+            if ("SUCCESS".equals(jo.getString("resultCode"))) {
                 JSONArray astUserShopList = jo.getJSONArray("astUserShopList");
                 int openShop = 0;
                 for (int i = 0; i < astUserShopList.length(); i++) {
@@ -110,11 +260,11 @@ public class AntStall {
         String s = AntStallRpcCall.preOneKeyClose();
         try {
             JSONObject jo = new JSONObject(s);
-            if (jo.getString("resultCode").equals("SUCCESS")) {
+            if ("SUCCESS".equals(jo.getString("resultCode"))) {
                 s = AntStallRpcCall.oneKeyClose();
                     jo = new JSONObject(s);
-                    if (jo.getString("resultCode").equals("SUCCESS")) {
-                        Log.recordLog("蚂蚁新村⛪一键收摊成功");
+                    if ("SUCCESS".equals(jo.getString("resultCode"))) {
+                        Log.farm("蚂蚁新村⛪一键收摊成功");
                     }
             } else {
                 Log.recordLog("shopOneKeyClose err:", s);
@@ -125,12 +275,34 @@ public class AntStall {
         }
     }
 
+    private static void shopClose(String shopId, String billNo, String userId) {
+        String s = AntStallRpcCall.preShopClose(shopId, billNo);
+        try {
+            JSONObject jo = new JSONObject(s);
+            if ("SUCCESS".equals(jo.getString("resultCode"))) {
+                JSONObject income = jo.getJSONObject("astPreviewShopSettleVO").getJSONObject("income");
+                s = AntStallRpcCall.shopClose(shopId);
+                jo = new JSONObject(s);
+                if ("SUCCESS".equals(jo.getString("resultCode"))) {
+                    Log.farm("蚂蚁新村⛪收取在[" + FriendIdMap.getNameById(userId) + "]的摊位获得" + income.getString("amount"));
+                } else {
+                    Log.recordLog("shopClose err:", s);
+                }
+            } else {
+                Log.recordLog("shopClose err:", s);
+            }
+        } catch (Throwable t) {
+            Log.i(TAG, "shopClose err:");
+            Log.printStackTrace(TAG, t);
+        }
+    }
+
     private static void shopOneKeyOpen() {
         String s = AntStallRpcCall.oneKeyOpen();
         try {
             JSONObject jo = new JSONObject(s);
-            if (jo.getString("resultCode").equals("SUCCESS")) {
-                Log.recordLog("蚂蚁新村⛪一键摆摊成功");
+            if ("SUCCESS".equals(jo.getString("resultCode"))) {
+                Log.farm("蚂蚁新村⛪一键摆摊成功");
             } else {
                 Log.recordLog("shopOneKeyOpen err:", s);
             }
@@ -144,7 +316,7 @@ public class AntStall {
         String s = AntStallRpcCall.taskList();
         try {
             JSONObject jo = new JSONObject(s);
-            if (jo.getString("resultCode").equals("SUCCESS")) {
+            if ("SUCCESS".equals(jo.getString("resultCode"))) {
                 JSONObject signListModel = jo.getJSONObject("signListModel");
                 if (!signListModel.getBoolean("currentKeySigned")) {
                     signToday();
@@ -185,8 +357,8 @@ public class AntStall {
         String s = AntStallRpcCall.signToday();
         try {
             JSONObject jo = new JSONObject(s);
-            if (jo.getString("resultCode").equals("SUCCESS")) {
-                Log.recordLog("蚂蚁新村⛪签到成功");
+            if ("SUCCESS".equals(jo.getString("resultCode"))) {
+                Log.farm("蚂蚁新村⛪签到成功");
             } else {
                 Log.recordLog("signToday err:", s);
             }
@@ -203,8 +375,8 @@ public class AntStall {
         String s = AntStallRpcCall.receiveTaskAward(taskType);
         try {
             JSONObject jo = new JSONObject(s);
-            if (jo.getString("resultCode").equals("SUCCESS")) {
-                Log.recordLog("蚂蚁新村⛪获取奖励成功");
+            if (jo.getBoolean("success")) {
+                Log.farm("蚂蚁新村⛪[领取奖励]");
             } else {
                 Log.recordLog("receiveTaskAward err:", s);
             }
@@ -218,8 +390,8 @@ public class AntStall {
         String s = AntStallRpcCall.finishTask(FriendIdMap.currentUid + "_" + taskType, taskType);
         try {
             JSONObject jo = new JSONObject(s);
-            if (jo.getString("resultCode").equals("SUCCESS")) {
-                Log.recordLog("蚂蚁新村⛪完成任务成功");
+            if ("SUCCESS".equals(jo.getString("resultCode"))) {
+                Log.farm("蚂蚁新村⛪完成任务成功");
                 return true;
             } else {
                 Log.recordLog("receiveTaskAward err:", s);
@@ -229,5 +401,81 @@ public class AntStall {
             Log.printStackTrace(TAG, t);
         }
         return false;
+    }
+
+    private static void donate() {
+        String s = AntStallRpcCall.projectList();
+        try {
+            JSONObject jo = new JSONObject(s);
+            if ("SUCCESS".equals(jo.getString("resultCode"))) {
+                JSONArray astProjectVOS = jo.getJSONArray("astProjectVOS");
+                for (int i = 0; i < astProjectVOS.length(); i++) {
+                    JSONObject project = astProjectVOS.getJSONObject(i);
+                    if ("ONLINE".equals(project.getString("status"))) {
+                        String projectId = project.getString("projectId");
+                        s = AntStallRpcCall.projectDetail(projectId);
+                        JSONObject joProjectDetail = new JSONObject(s);
+                        if ("SUCCESS".equals(joProjectDetail.getString("resultCode"))) {
+                            s = AntStallRpcCall.projectDonate(projectId);
+                            JSONObject joProjectDonate = new JSONObject(s);
+                            if ("SUCCESS".equals(joProjectDonate.getString("resultCode"))) {
+                                JSONObject astUserVillageVO = joProjectDetail.getJSONObject("astUserVillageVO");
+                                if (astUserVillageVO.getInt("donateCount") >= astUserVillageVO.getInt("donateLimit")) {
+                                    roadmap();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            Log.i(TAG, "donate err:");
+            Log.printStackTrace(TAG, t);
+        }
+    }
+
+    private static void roadmap() {
+        String s = AntStallRpcCall.roadmap();
+        try {
+            JSONObject jo = new JSONObject(s);
+            if ("SUCCESS".equals(jo.getString("resultCode"))) {
+                JSONObject userInfo = jo.getJSONObject("userInfo");
+                JSONObject currentCoin = userInfo.getJSONObject("currentCoin");
+                int amount = (int) currentCoin.getDouble("amount");
+                if (amount < 10000) {
+                    return;
+                }
+                JSONArray roadList = jo.getJSONArray("roadList");
+                boolean unFinished = false;
+                boolean canNext = false;
+                for (int i = 0; i < roadList.length(); i++) {
+                    JSONObject road = roadList.getJSONObject(i);
+                    if ("FINISHED".equals(road.getString("roadStatus"))) {
+                        continue;
+                    }
+                    if ("LOCK".equals(road.getString("roadStatus"))) {
+                        canNext = true;
+                        break;
+                    }
+                    if (road.getInt("donateCount") < road.getInt("donateLimit")) {
+                        unFinished = true;
+                    }
+                }
+                if (unFinished) {
+                    donate();
+                } else if (canNext) {
+                    s = AntStallRpcCall.nextVillage();
+                    jo = new JSONObject(s);
+                    if ("SUCCESS".equals(jo.getString("resultCode"))) {
+                        Log.farm("蚂蚁新村⛪进入下一村成功");
+                    }
+                }
+            } else {
+                Log.recordLog("roadmap err:", s);
+            }
+        } catch (Throwable t) {
+            Log.i(TAG, "roadmap err:");
+            Log.printStackTrace(TAG, t);
+        }
     }
 }
